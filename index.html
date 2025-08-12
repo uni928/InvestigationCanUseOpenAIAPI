@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>OpenAI 利用可能モデル一覧ビューア</title>
+<style>
+  body { font-family: system-ui, -apple-system, sans-serif; background:#f6f7f9; margin:0; padding:24px; color:#222; }
+  .card { max-width: 980px; margin: 0 auto; background:#fff; border-radius:12px; padding:20px; box-shadow: 0 8px 24px rgba(0,0,0,.08); }
+  h1 { font-size: 20px; margin: 0 0 12px; }
+  .row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px; }
+  .row-3 { display: grid; grid-template-columns: 2fr 1fr 1fr; gap: 12px; margin-bottom: 12px; }
+  label { font-size: 13px; font-weight: 600; color:#444; }
+  input { width: 100%; padding: 10px 12px; border:1px solid #d0d5dd; border-radius:8px; font-size: 14px; box-sizing: border-box; }
+  button { padding: 10px 14px; border: 0; border-radius: 8px; background:#2563eb; color:#fff; font-weight:600; cursor:pointer; }
+  button:disabled { background:#9bb7ff; cursor:not-allowed; }
+  .controls { display:flex; gap: 10px; align-items: end; margin-top: 4px; }
+  .muted { color:#666; font-size: 12px; }
+  .status { margin: 8px 0; font-size: 13px; }
+  .error { color:#b91c1c; font-weight:600; }
+  .ok { color:#166534; font-weight:600; }
+  table { width:100%; border-collapse: collapse; margin-top: 12px; }
+  th, td { text-align: left; padding: 10px; border-bottom: 1px solid #eef0f3; font-size: 13px; }
+  th { background:#f3f5f8; position: sticky; top:0; z-index:1; }
+  .pill { display:inline-block; padding:2px 8px; border-radius:999px; font-size:12px; background:#eef2ff; }
+  .toolbar { display:flex; gap:10px; align-items:center; margin-top: 8px; }
+  .flex1 { flex:1; }
+  .code { background:#0b1020; color:#e3e9ff; padding:10px; border-radius:8px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; overflow:auto; font-size:12px; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <h1>OpenAI 利用可能モデル一覧</h1>
+    <p class="muted">ローカル検証向け。キーは保存されませんが、ブラウザに入力する時点で安全ではありません。</p>
+
+    <div class="row">
+      <div>
+        <label>API Key（sk- / sk-proj-）</label>
+        <input id="apiKey" type="password" placeholder="sk-xxxxxxxxxxxxxxxxxxxxxxxx" autocomplete="off" />
+      </div>
+      <div>
+        <label>Organization ID（任意 / 組織利用時）</label>
+        <input id="orgId" type="text" placeholder="org_XXXXXXXXXXXX (任意)" />
+      </div>
+    </div>
+
+    <div class="toolbar">
+      <div class="flex1">
+        <label>フィルタ（例：gpt-5 / nano / o-mini など）</label>
+        <input id="filter" type="text" placeholder="キーワードで絞り込み" />
+      </div>
+      <div>
+        <label>&nbsp;</label><br/>
+        <button id="fetchBtn">モデル一覧を取得</button>
+      </div>
+    </div>
+
+    <div id="status" class="status"></div>
+
+    <div id="count" class="muted"></div>
+
+    <div style="max-height: 420px; overflow: auto; border:1px solid #eef0f3; border-radius:8px; margin-top: 8px;">
+      <table id="modelsTable">
+        <thead>
+          <tr>
+            <th style="width:44%;">model id</th>
+            <th style="width:20%;">owner</th>
+            <th style="width:18%;">created</th>
+            <th style="width:18%;">type</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+
+    <details style="margin-top:12px;">
+      <summary>生データ（JSON）を見る</summary>
+      <pre id="raw" class="code"></pre>
+    </details>
+  </div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const fetchBtn = $("fetchBtn");
+const statusBox = $("status");
+const tableBody = $("modelsTable").querySelector("tbody");
+const rawBox = $("raw");
+const countBox = $("count");
+const filterBox = $("filter");
+
+function fmtDate(sec) {
+  // APIは created を秒で返すことが多いが未定義のこともある
+  if (!sec || typeof sec !== "number") return "-";
+  try {
+    const d = new Date(sec * 1000);
+    return d.toISOString().replace("T", " ").replace(".000Z", "Z");
+  } catch {
+    return "-";
+  }
+}
+
+function detectType(id) {
+  if (!id) return "-";
+  if (id.includes("embedding")) return "embedding";
+  if (id.includes("audio") || id.includes("tts")) return "audio";
+  if (id.includes("vision") || id.includes("-v-")) return "vision";
+  return "text";
+}
+
+function renderTable(items, keyword="") {
+  const kw = keyword.trim().toLowerCase();
+  tableBody.innerHTML = "";
+  let filtered = items;
+  if (kw) {
+    filtered = items.filter(m =>
+      (m.id || "").toLowerCase().includes(kw) ||
+      (m.owned_by || "").toLowerCase().includes(kw)
+    );
+  }
+  // id昇順でソート
+  filtered.sort((a,b) => (a.id || "").localeCompare(b.id || ""));
+  countBox.textContent = `表示中: ${filtered.length} / 全体: ${items.length}`;
+
+  for (const m of filtered) {
+    const tr = document.createElement("tr");
+    const tdId = document.createElement("td");
+    const tdOwner = document.createElement("td");
+    const tdCreated = document.createElement("td");
+    const tdType = document.createElement("td");
+
+    tdId.textContent = m.id || "-";
+    tdOwner.textContent = m.owned_by || "-";
+    tdCreated.textContent = fmtDate(m.created);
+    const type = detectType(m.id);
+    tdType.innerHTML = `<span class="pill">${type}</span>`;
+
+    tr.appendChild(tdId);
+    tr.appendChild(tdOwner);
+    tr.appendChild(tdCreated);
+    tr.appendChild(tdType);
+    tableBody.appendChild(tr);
+  }
+}
+
+let lastData = [];
+
+filterBox.addEventListener("input", () => {
+  renderTable(lastData, filterBox.value);
+});
+
+fetchBtn.addEventListener("click", async () => {
+  const key = $("apiKey").value.trim();
+  const org = $("orgId").value.trim();
+
+  if (!key) {
+    statusBox.innerHTML = '<span class="error">APIキーを入力してください。</span>';
+    return;
+  }
+
+  fetchBtn.disabled = true;
+  statusBox.innerHTML = '<span class="ok">取得中...</span>';
+  tableBody.innerHTML = "";
+  rawBox.textContent = "";
+  countBox.textContent = "";
+
+  try {
+    const headers = {
+      "Authorization": `Bearer ${key}`
+    };
+    if (org) headers["OpenAI-Organization"] = org;
+
+    const res = await fetch("https://api.openai.com/v1/models", {
+      method: "GET",
+      headers
+    });
+
+    if (!res.ok) {
+      const text = await res.text().catch(()=>"");
+      throw new Error(`HTTP ${res.status} ${res.statusText}\n${text}`);
+    }
+
+    const json = await res.json();
+    const items = Array.isArray(json.data) ? json.data : [];
+
+    lastData = items;
+    renderTable(items, filterBox.value);
+    rawBox.textContent = JSON.stringify(json, null, 2);
+    statusBox.innerHTML = '<span class="ok">取得完了。</span>';
+
+  } catch (err) {
+    statusBox.innerHTML = `<span class="error">エラー: ${err.message}</span>`;
+  } finally {
+    fetchBtn.disabled = false;
+  }
+});
+</script>
+</body>
+</html>
